@@ -1,7 +1,7 @@
 import { useRef, useCallback, useEffect } from 'react'
 import { v4 as uuidv4 } from 'uuid'
-import * as FileSystem from 'expo-file-system'
 import { AudioRecorder } from '@/services/audio/AudioRecorder'
+import { AudioStreamer } from '@/services/audio/AudioStreamer'
 import { TranscriptionClient } from '@/services/transcription/TranscriptionClient'
 import { MeetingRepository } from '@/services/storage/MeetingRepository'
 import { ApiClient } from '@/services/api/ApiClient'
@@ -12,14 +12,14 @@ import { useSettingsStore } from '@/stores/settingsStore'
 import type { ServerMessage, GenerateSummaryRequest, GenerateSummaryResponse } from '@nelson/shared-types'
 import { useQueryClient } from '@tanstack/react-query'
 
-const CHUNK_INTERVAL_MS = 200
+// WAV header is 44 bytes; skip it so only PCM samples are streamed to STT
+const WAV_HEADER_BYTES = 44
 
 export function useRecording() {
   const recorder = useRef(new AudioRecorder())
+  const streamer = useRef(new AudioStreamer(WAV_HEADER_BYTES))
   const wsClient = useRef(new TranscriptionClient())
   const elapsedTimer = useRef<NodeJS.Timeout | null>(null)
-  const chunkTimer = useRef<NodeJS.Timeout | null>(null)
-  const lastFileSize = useRef(0)
   const queryClient = useQueryClient()
 
   const {
@@ -34,7 +34,7 @@ export function useRecording() {
   useEffect(() => {
     return () => {
       elapsedTimer.current && clearInterval(elapsedTimer.current)
-      chunkTimer.current && clearInterval(chunkTimer.current)
+      streamer.current.stop()
       wsClient.current.disconnect()
     }
   }, [])
@@ -107,7 +107,7 @@ export function useRecording() {
         setElapsedMs(Date.now() - startMs)
       }, 1000)
 
-      // Connect WebSocket for transcription
+      // Connect WebSocket and start streaming audio chunks
       if (accessToken) {
         wsClient.current.connect(
           accessToken,
@@ -119,6 +119,14 @@ export function useRecording() {
           },
           handleServerMessage
         )
+
+        // Begin streaming the growing audio file to the BFF via WebSocket
+        const audioUri = recorder.current.getActiveUri()
+        if (audioUri) {
+          streamer.current.start(audioUri, (chunk) => {
+            wsClient.current.sendAudioChunk(chunk)
+          })
+        }
       }
 
     } catch (err) {
@@ -152,8 +160,11 @@ export function useRecording() {
     if (!meetingId) return null
 
     elapsedTimer.current && clearInterval(elapsedTimer.current)
-    chunkTimer.current && clearInterval(chunkTimer.current)
     setStatus('stopping')
+
+    // Flush final audio bytes before ending the STT session
+    await streamer.current.flush()
+    streamer.current.stop()
 
     wsClient.current.endSession()
 
@@ -202,14 +213,13 @@ export function useRecording() {
 
     setStatus('idle')
     reset()
-    lastFileSize.current = 0
 
     return meetingId
   }, [accessToken, settings.aiQuality, queryClient])
 
   const cancelRecording = useCallback(async () => {
     elapsedTimer.current && clearInterval(elapsedTimer.current)
-    chunkTimer.current && clearInterval(chunkTimer.current)
+    streamer.current.stop()
 
     wsClient.current.endSession()
     wsClient.current.disconnect()
@@ -222,7 +232,6 @@ export function useRecording() {
 
     clearTranscript()
     reset()
-    lastFileSize.current = 0
   }, [])
 
   return { startRecording, pauseRecording, resumeRecording, stopRecording, cancelRecording }

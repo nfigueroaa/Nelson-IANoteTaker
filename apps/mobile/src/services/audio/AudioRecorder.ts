@@ -15,9 +15,11 @@ const RECORDING_OPTIONS: Audio.RecordingOptions = {
     numberOfChannels: 1,
     bitRate: 128000,
   },
+  // WAV/PCM output on iOS allows real-time streaming to Google STT (LINEAR16).
+  // The WAV header is 44 bytes; AudioStreamer skips it automatically.
   ios: {
-    extension: '.m4a',
-    audioQuality: Audio.IOSAudioQuality.HIGH,
+    extension: '.wav',
+    audioQuality: Audio.IOSAudioQuality.MEDIUM,
     sampleRate: 16000,
     numberOfChannels: 1,
     bitRate: 128000,
@@ -73,6 +75,10 @@ export class AudioRecorder {
         this.amplitudeCallback?.(status.metering)
       }
     })
+  }
+
+  getActiveUri(): string | null {
+    return this.recording?.getURI() ?? null
   }
 
   async pause(): Promise<void> {
