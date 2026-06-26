@@ -1,0 +1,51 @@
+{
+  "expo": {
+    "name": "Nelson IANoteTaker",
+    "slug": "nelson-ianotetaker",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "nelsonnotetaker",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.nelson.ianotetaker",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Nelson necesita acceso al micrófono para grabar reuniones y transcribirlas en tiempo real.",
+        "NSPhotoLibraryUsageDescription": "Nelson necesita acceso para guardar grabaciones."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#1a1a2e"
+      },
+      "package": "com.nelson.ianotetaker",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.INTERNET"
+      ]
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Nelson necesita acceso al micrófono para grabar reuniones."
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
