@@ -1,4 +1,5 @@
 import { useRef, useCallback, useEffect } from 'react'
+import { Alert } from 'react-native'
 import { v4 as uuidv4 } from 'uuid'
 import { AudioRecorder } from '@/services/audio/AudioRecorder'
 import { AudioStreamer } from '@/services/audio/AudioStreamer'
@@ -12,14 +13,19 @@ import { useSettingsStore } from '@/stores/settingsStore'
 import type { ServerMessage, GenerateSummaryRequest, GenerateSummaryResponse } from '@nelson/shared-types'
 import { useQueryClient } from '@tanstack/react-query'
 
-// WAV header is 44 bytes; skip it so only PCM samples are streamed to STT
 const WAV_HEADER_BYTES = 44
+const MAX_RECORDING_MS = 2 * 60 * 60 * 1000   // 2 horas hard limit
+const WARNING_MS = (2 * 60 - 15) * 60 * 1000  // aviso a 1h 45min
 
 export function useRecording() {
   const recorder = useRef(new AudioRecorder())
   const streamer = useRef(new AudioStreamer(WAV_HEADER_BYTES))
   const wsClient = useRef(new TranscriptionClient())
   const elapsedTimer = useRef<NodeJS.Timeout | null>(null)
+  const warningTimer = useRef<NodeJS.Timeout | null>(null)
+  const hardLimitTimer = useRef<NodeJS.Timeout | null>(null)
+  // Ref para que el hardLimitTimer pueda llamar a stopRecording sin closure stale
+  const stopRecordingRef = useRef<(() => Promise<string | null>) | null>(null)
   const queryClient = useQueryClient()
 
   const {
@@ -34,10 +40,21 @@ export function useRecording() {
   useEffect(() => {
     return () => {
       elapsedTimer.current && clearInterval(elapsedTimer.current)
+      warningTimer.current && clearTimeout(warningTimer.current)
+      hardLimitTimer.current && clearTimeout(hardLimitTimer.current)
       streamer.current.stop()
       wsClient.current.disconnect()
     }
   }, [])
+
+  function clearSessionTimers() {
+    elapsedTimer.current && clearInterval(elapsedTimer.current)
+    warningTimer.current && clearTimeout(warningTimer.current)
+    hardLimitTimer.current && clearTimeout(hardLimitTimer.current)
+    elapsedTimer.current = null
+    warningTimer.current = null
+    hardLimitTimer.current = null
+  }
 
   function handleServerMessage(msg: ServerMessage) {
     switch (msg.type) {
@@ -72,6 +89,14 @@ export function useRecording() {
         setCurrentLanguage(msg.to)
         break
 
+      case 'SESSION_WARNING':
+        Alert.alert(
+          '⏱ Límite de grabación',
+          `Quedan ${msg.minutesRemaining} minutos. La grabación se detendrá automáticamente al llegar a 2 horas.`,
+          [{ text: 'Entendido' }]
+        )
+        break
+
       case 'ERROR':
         console.error('[Recording] Server error:', msg.code, msg.message)
         break
@@ -88,7 +113,6 @@ export function useRecording() {
 
       await recorder.current.start((amplitude) => setAmplitude(amplitude))
 
-      // Create meeting record
       await MeetingRepository.create({
         id: meetingId,
         title: `Reunión ${now.toLocaleDateString('es-ES', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`,
@@ -101,13 +125,32 @@ export function useRecording() {
       setCurrentLanguage(settings.primaryLanguage)
       setStatus('recording')
 
-      // Start elapsed timer
       const startMs = Date.now()
       elapsedTimer.current = setInterval(() => {
         setElapsedMs(Date.now() - startMs)
       }, 1000)
 
-      // Connect WebSocket and start streaming audio chunks
+      // Aviso al usuario 15 min antes del límite
+      warningTimer.current = setTimeout(() => {
+        Alert.alert(
+          '⏱ Límite de grabación',
+          'Quedan 15 minutos. La grabación se detendrá automáticamente al llegar a 2 horas.',
+          [{ text: 'Entendido' }]
+        )
+      }, WARNING_MS)
+
+      // Auto-stop a las 2 horas — usa ref para evitar closure stale
+      hardLimitTimer.current = setTimeout(async () => {
+        const id = await stopRecordingRef.current?.()
+        if (id) {
+          Alert.alert(
+            '⏹ Grabación detenida',
+            'Se alcanzó el límite máximo de 2 horas de grabación.',
+            [{ text: 'Ver resumen', style: 'default' }]
+          )
+        }
+      }, MAX_RECORDING_MS)
+
       if (accessToken) {
         wsClient.current.connect(
           accessToken,
@@ -120,7 +163,6 @@ export function useRecording() {
           handleServerMessage
         )
 
-        // Begin streaming the growing audio file to the BFF via WebSocket
         const audioUri = recorder.current.getActiveUri()
         if (audioUri) {
           streamer.current.start(audioUri, (chunk) => {
@@ -131,6 +173,7 @@ export function useRecording() {
 
     } catch (err) {
       console.error('[Recording] Failed to start:', err)
+      clearSessionTimers()
       setStatus('idle')
       throw err
     }
@@ -139,6 +182,7 @@ export function useRecording() {
   const pauseRecording = useCallback(async () => {
     await recorder.current.pause()
     elapsedTimer.current && clearInterval(elapsedTimer.current)
+    elapsedTimer.current = null
     setStatus('paused')
   }, [])
 
@@ -154,15 +198,13 @@ export function useRecording() {
 
   const stopRecording = useCallback(async (): Promise<string | null> => {
     const meetingId = useRecordingStore.getState().currentMeetingId
-    const startedAt = useRecordingStore.getState().startedAt
     const elapsedMs = useRecordingStore.getState().elapsedMs
 
     if (!meetingId) return null
 
-    elapsedTimer.current && clearInterval(elapsedTimer.current)
+    clearSessionTimers()
     setStatus('stopping')
 
-    // Flush final audio bytes before ending the STT session
     await streamer.current.flush()
     streamer.current.stop()
 
@@ -189,8 +231,8 @@ export function useRecording() {
     setStatus('processing')
     queryClient.invalidateQueries({ queryKey: ['meetings'] })
 
-    // Generate AI summary in background
-    const fullTranscript = segments.map((s) => s.text).join(' ')
+    // Limitar el transcript a 50k chars para controlar costos de Gemini
+    const fullTranscript = segments.map((s) => s.text).join(' ').slice(0, 50_000)
     if (fullTranscript.trim().length > 50 && accessToken) {
       try {
         const req: GenerateSummaryRequest = {
@@ -217,8 +259,13 @@ export function useRecording() {
     return meetingId
   }, [accessToken, settings.aiQuality, queryClient])
 
+  // Mantener la ref sincronizada con la última versión de stopRecording
+  useEffect(() => {
+    stopRecordingRef.current = stopRecording
+  }, [stopRecording])
+
   const cancelRecording = useCallback(async () => {
-    elapsedTimer.current && clearInterval(elapsedTimer.current)
+    clearSessionTimers()
     streamer.current.stop()
 
     wsClient.current.endSession()

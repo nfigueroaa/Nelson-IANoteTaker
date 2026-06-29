@@ -36,6 +36,7 @@ export type ServerMessage =
   | { type: 'ERROR'; code: string; message: string }
   | { type: 'SESSION_ENDED' }
   | { type: 'PONG' }
+  | { type: 'SESSION_WARNING'; minutesRemaining: number; reason: string }
 
 // ─── REST API Contracts ───────────────────────────────────────────────────────
 

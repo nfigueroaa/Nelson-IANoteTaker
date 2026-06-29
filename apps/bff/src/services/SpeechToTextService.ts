@@ -86,8 +86,9 @@ export class SpeechToTextService {
         enableAutomaticPunctuation: true,
         enableSpeakerDiarization: this.config.enableDiarization,
         diarizationSpeakerCount: this.config.speakerCount,
-        model: 'latest_long',
-        useEnhanced: true,
+        model: process.env.STT_MODEL ?? 'latest_long',
+        // STT_ENHANCED=true activa el tier Enhanced (~50% más caro). Por defecto false (Standard).
+        useEnhanced: process.env.STT_ENHANCED === 'true',
         metadata: { interactionType: 'DISCUSSION' as const },
       },
       interimResults: true,

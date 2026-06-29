@@ -37,6 +37,12 @@ export class GeminiService {
   }
 
   async generateMeetingInsights(transcript: string, options: AIOptions): Promise<MeetingSummary> {
+    // Limitar a 50k chars (~12,500 tokens) para controlar costos.
+    // Una reunión de 2h tiene aprox. 30k-60k chars de transcript.
+    const safeTranscript = transcript.length > 50_000
+      ? transcript.slice(0, 50_000) + '\n[Transcript truncado por límite de longitud]'
+      : transcript
+
     const modelName = options.quality === 'quality' ? 'gemini-1.5-pro' : 'gemini-2.0-flash'
 
     const model = this.genai.getGenerativeModel({
@@ -49,7 +55,7 @@ export class GeminiService {
       ? `The meeting may include speech in: ${options.languages.join(', ')}.`
       : ''
 
-    const prompt = `${languageHint}\n\nAnalyze this meeting transcript:\n\n${transcript}`
+    const prompt = `${languageHint}\n\nAnalyze this meeting transcript:\n\n${safeTranscript}`
 
     const result = await model.generateContent(prompt)
     const text = result.response.text()

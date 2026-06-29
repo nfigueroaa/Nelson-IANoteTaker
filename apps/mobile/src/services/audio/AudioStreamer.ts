@@ -1,6 +1,15 @@
 import * as FileSystem from 'expo-file-system'
 
-const POLL_INTERVAL_MS = 200
+// Intervalo adaptativo según el tamaño estimado del archivo.
+// Para archivos grandes, leer el archivo completo cada 200ms sería muy costoso en CPU.
+// Base64 ≈ 4/3 × bytes reales.
+function intervalForSize(sentBase64Length: number): number {
+  const estimatedMB = (sentBase64Length * 3) / (4 * 1024 * 1024)
+  if (estimatedMB < 10) return 200   // < 10 MB → 200 ms
+  if (estimatedMB < 50) return 500   // 10–50 MB → 500 ms
+  if (estimatedMB < 100) return 1000 // 50–100 MB → 1 s
+  return 2000                         // > 100 MB (>60 min WAV) → 2 s
+}
 
 // Streams a growing audio file in base64 chunks.
 // Reads the file incrementally by tracking how many base64 characters have been sent.
@@ -12,8 +21,7 @@ export class AudioStreamer {
   private onChunk: ((base64Chunk: string) => void) | null = null
   private headerSkipBytes: number
 
-  // headerSkipBytes: bytes to skip at the start of the file (e.g. 44 for WAV header).
-  // Set to 0 for formats where streaming from byte 0 is safe.
+  // headerSkipBytes: bytes a saltar al inicio del archivo (44 para WAV header).
   constructor(headerSkipBytes = 0) {
     this.headerSkipBytes = headerSkipBytes
   }
@@ -22,41 +30,46 @@ export class AudioStreamer {
     this.fileUri = fileUri
     this.onChunk = onChunk
     this.sentBase64Length = 0
+    this.scheduleNextRead(200)
+  }
 
-    this.timer = setInterval(() => {
-      this.readAndSend().catch(() => {})
-    }, POLL_INTERVAL_MS)
+  private scheduleNextRead(intervalMs: number): void {
+    if (!this.fileUri) return
+    this.timer = setTimeout(() => {
+      this.readAndSend()
+        .catch(() => {})
+        .finally(() => {
+          if (this.fileUri) {
+            // Recalcular el intervalo en cada ciclo según el tamaño actual
+            this.scheduleNextRead(intervalForSize(this.sentBase64Length))
+          }
+        })
+    }, intervalMs)
   }
 
   private async readAndSend(): Promise<void> {
     if (!this.fileUri || !this.onChunk) return
 
-    try {
-      const info = await FileSystem.getInfoAsync(this.fileUri)
-      if (!info.exists) return
+    const info = await FileSystem.getInfoAsync(this.fileUri)
+    if (!info.exists) return
 
-      const base64 = await FileSystem.readAsStringAsync(this.fileUri, {
-        encoding: FileSystem.EncodingType.Base64,
-      })
+    const base64 = await FileSystem.readAsStringAsync(this.fileUri, {
+      encoding: FileSystem.EncodingType.Base64,
+    })
 
-      if (base64.length <= this.sentBase64Length) return
+    const skipBase64 = Math.ceil((this.headerSkipBytes * 4) / 3 / 4) * 4
+    const startPos = Math.max(this.sentBase64Length, skipBase64)
 
-      // Skip header: headerSkipBytes * (4/3) base64 chars (rounded to 4-char boundary)
-      const skipBase64 = Math.ceil((this.headerSkipBytes * 4) / 3 / 4) * 4
-      const startPos = Math.max(this.sentBase64Length, skipBase64)
+    if (base64.length <= startPos) return
 
-      const newPortion = base64.slice(startPos)
-      // Only send complete 4-char base64 groups to avoid decoding errors
-      const alignedLen = Math.floor(newPortion.length / 4) * 4
-      if (alignedLen === 0) return
+    const newPortion = base64.slice(startPos)
+    // Solo enviar grupos completos de 4 chars base64 para evitar errores de decodificación
+    const alignedLen = Math.floor(newPortion.length / 4) * 4
+    if (alignedLen === 0) return
 
-      const chunk = newPortion.slice(0, alignedLen)
-      this.sentBase64Length = startPos + alignedLen
-
-      this.onChunk(chunk)
-    } catch {
-      // File may not exist yet or may be temporarily locked
-    }
+    const chunk = newPortion.slice(0, alignedLen)
+    this.sentBase64Length = startPos + alignedLen
+    this.onChunk(chunk)
   }
 
   async flush(): Promise<void> {
@@ -79,7 +92,7 @@ export class AudioStreamer {
 
   stop(): void {
     if (this.timer) {
-      clearInterval(this.timer)
+      clearTimeout(this.timer)
       this.timer = null
     }
     this.fileUri = null

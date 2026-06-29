@@ -4,6 +4,8 @@ import { SpeechToTextService } from '../services/SpeechToTextService'
 import type { ClientMessage, ServerMessage } from '@nelson/shared-types'
 
 const PING_INTERVAL_MS = 30_000
+const MAX_SESSION_MS = 2 * 60 * 60 * 1000       // 2 horas hard limit
+const WARNING_BEFORE_MS = 15 * 60 * 1000          // aviso 15 min antes
 
 export function handleTranscriptionSession(ws: WebSocket, _token: string | null) {
   const sessionId = uuidv4()
@@ -18,6 +20,21 @@ export function handleTranscriptionSession(ws: WebSocket, _token: string | null)
       ws.ping()
     }
   }, PING_INTERVAL_MS)
+
+  // Aviso 15 min antes del límite
+  const warningTimer = setTimeout(() => {
+    send({ type: 'SESSION_WARNING', minutesRemaining: 15, reason: 'Límite de 2 horas de grabación' })
+    console.log(`[WS:${sessionId}] Warning sent: 15 min remaining`)
+  }, MAX_SESSION_MS - WARNING_BEFORE_MS)
+
+  // Cierre forzado al llegar a 2 horas
+  const hardLimitTimer = setTimeout(() => {
+    console.log(`[WS:${sessionId}] Hard limit reached (2h), closing session`)
+    sessionActive = false
+    stt.stop()
+    send({ type: 'SESSION_ENDED' })
+    ws.close(1000, 'Session duration limit reached')
+  }, MAX_SESSION_MS)
 
   function send(msg: ServerMessage) {
     if (ws.readyState === WebSocket.OPEN) {
@@ -111,17 +128,23 @@ export function handleTranscriptionSession(ws: WebSocket, _token: string | null)
     }
   })
 
-  ws.on('close', () => {
+  function cleanup() {
     clearInterval(pingTimer)
+    clearTimeout(warningTimer)
+    clearTimeout(hardLimitTimer)
     if (sessionActive) {
       stt.stop()
+      sessionActive = false
     }
+  }
+
+  ws.on('close', () => {
+    cleanup()
     console.log(`[WS:${sessionId}] Connection closed`)
   })
 
   ws.on('error', (err) => {
     console.error(`[WS:${sessionId}] WebSocket error:`, err.message)
-    stt.stop()
-    clearInterval(pingTimer)
+    cleanup()
   })
 }
